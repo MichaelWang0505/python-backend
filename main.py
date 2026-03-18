@@ -4,6 +4,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
+import sounddevice as sd
+import vosk
+import json
 
 load_dotenv()
 ORS_API_KEY = os.getenv("ORS_API_KEY")
@@ -28,9 +31,19 @@ app.add_middleware(
 def root():
     return {"status": "good"}
 
+model = vosk.Model("vosk-model-small-en-us-0.15")
+
 @app.get("/voice_input")
 def voice_input():
-    return {"text": ""}
+    recognizer = vosk.KaldiRecognizer(model, 16000)
+    with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16', channels=1) as stream:
+        while True:
+            data, _ = stream.read(4000)
+            if recognizer.AcceptWaveform(bytes(data)):
+                result = json.loads(recognizer.Result())
+                text = result.get("text", "")
+                if text:
+                    return {"text": text}
 
 @app.get("/signs")
 def signs():
