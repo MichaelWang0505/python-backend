@@ -1,5 +1,18 @@
+import os
+import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+from pydantic import BaseModel
+
+load_dotenv()
+ORS_API_KEY = os.getenv("ORS_API_KEY")
+
+class RouteRequest(BaseModel):
+    startLat: float
+    startLon: float
+    endLat: float
+    endLon: float
 
 app = FastAPI()
 
@@ -49,3 +62,25 @@ def signs():
         }
     }
     
+@app.post("/api/route")
+def get_route(route: RouteRequest):
+    url = "https://api.openrouteservice.org/v2/directions/foot-walking"
+
+    headers = {
+        "Authorization": ORS_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    body = {
+        "coordinates": [
+            [route.startLon, route.startLat],
+            [route.endLon, route.endLat],
+        ],
+        "instructions": True,
+    }
+
+    try:
+        response = requests.post(url, json = body, headers = headers)
+        return response.json()
+    except Exception as e:
+        return {"Error:", str(e)}
