@@ -1,12 +1,13 @@
 import os
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
-import sounddevice as sd
 import vosk
 import json
+import wave
+import io
 
 load_dotenv()
 ORS_API_KEY = os.getenv("ORS_API_KEY")
@@ -33,17 +34,21 @@ def root():
 
 model = vosk.Model("vosk-model-small-en-us-0.15")
 
-@app.get("/voice_input")
-def voice_input():
+@app.post("/voice_input")
+async def voice_input(file: UploadFile = File(...)):
     recognizer = vosk.KaldiRecognizer(model, 16000)
-    with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16', channels=1) as stream:
+    
+    audio_data = await file.read()
+    
+    with wave.open(io.BytesIO(audio_data)) as wf:
         while True:
-            data, _ = stream.read(4000)
-            if recognizer.AcceptWaveform(bytes(data)):
-                result = json.loads(recognizer.Result())
-                text = result.get("text", "")
-                if text:
-                    return {"text": text}
+            data = wf.readframes(4000)
+            if len(data) == 0:
+                break
+            recognizer.AcceptWaveform(data)
+    
+    result = json.loads(recognizer.FinalResult())
+    return {"text": result.get("text", "")}
 
 @app.get("/signs")
 def signs():
@@ -55,7 +60,6 @@ def signs():
             "detected": False,
         },
         "exit_left": {
-      
             "detected": False,
         },
         "exit_both_ways": {
