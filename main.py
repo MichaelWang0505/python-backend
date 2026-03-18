@@ -4,6 +4,7 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
+from groq import Groq
 
 load_dotenv()
 ORS_API_KEY = os.getenv("ORS_API_KEY")
