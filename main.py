@@ -1,15 +1,15 @@
 import os
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
-import sounddevice as sd
-import vosk
-import json
+from groq import Groq
+import tempfile
 
 load_dotenv()
 ORS_API_KEY = os.getenv("ORS_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 class RouteRequest(BaseModel):
     startLat: float
@@ -27,24 +27,30 @@ app.add_middleware(
     allow_headers = ["*"],
 )
 
+groq_client = Groq(api_key = GROQ_API_KEY)
+
 @app.get("/")
 def root():
     return {"status": "good"}
 
-model = vosk.Model("vosk-model-small-en-us-0.15")
-
-@app.get("/voice_input")
-def voice_input():
-    recognizer = vosk.KaldiRecognizer(model, 16000)
-    with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16', channels=1) as stream:
-        while True:
-            data, _ = stream.read(4000)
-            if recognizer.AcceptWaveform(bytes(data)):
-                result = json.loads(recognizer.Result())
-                text = result.get("text", "")
-                if text:
-                    return {"text": text}
-
+@app.post("/voice_input")
+async def voice_input(audio: UploadFile = File(...)):
+    contents = await audio.read()
+    
+    with tempfile.NamedTemporaryFile(delete = False, suffix = ".m4a") as temp:
+        temp.write(contents)
+        temp_path = temp.name
+        
+    try:
+        with open(temp_path, "rb") as f:
+            transcription = groq_client.audio.transcriptions.create(
+                file = (audio.filename or "audio.m4a", f),
+                model = "whisper-large-v3",
+            )
+        return {"text": transcription.text}
+    finally:
+        os.unlink(temp_path)
+        
 @app.get("/signs")
 def signs():
     return {
@@ -90,6 +96,7 @@ def get_route(route: RouteRequest):
             [route.endLon, route.endLat],
         ],
         "instructions": True,
+        "geometry_format": "geojson",
     }
 
     try:
