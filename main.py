@@ -11,6 +11,9 @@ load_dotenv()
 ORS_API_KEY = os.getenv("ORS_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+print("GROQ api key exists:", GROQ_API_KEY is not None)
+print("api key value:", GROQ_API_KEY)
+
 class RouteRequest(BaseModel):
     startLat: float
     startLon: float
