@@ -82,7 +82,7 @@ def signs():
     
 @app.post("/api/route")
 def get_route(route: RouteRequest):
-    url = "https://api.openrouteservice.org/v2/directions/foot-walking/geojson"
+    url = "https://api.openrouteservice.org/v2/directions/foot-walking/json"
 
     headers = {
         "Authorization": ORS_API_KEY,
