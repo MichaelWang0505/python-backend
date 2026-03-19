@@ -1,7 +1,7 @@
 import os
 import tempfile
 import requests
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -10,9 +10,6 @@ from groq import Groq
 load_dotenv()
 ORS_API_KEY = os.getenv("ORS_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-print("GROQ api key exists:", GROQ_API_KEY is not None)
-print("api key value:", GROQ_API_KEY)
 
 class RouteRequest(BaseModel):
     startLat: float
@@ -85,7 +82,7 @@ def signs():
     
 @app.post("/api/route")
 def get_route(route: RouteRequest):
-    url = "https://api.openrouteservice.org/v2/directions/foot-walking"
+    url = "https://api.openrouteservice.org/v2/directions/foot-walking/geojson"
 
     headers = {
         "Authorization": ORS_API_KEY,
@@ -98,11 +95,14 @@ def get_route(route: RouteRequest):
             [route.endLon, route.endLat],
         ],
         "instructions": True,
-        "geometry_format": "geojson",
     }
 
     try:
-        response = requests.post(url, json = body, headers = headers)
+        response = requests.post(url, json=body, headers=headers, timeout=20)
+        response.raise_for_status()
         return response.json()
+    except requests.HTTPError:
+        detail = response.text if "response" in locals() else "ORS HTTP error"
+        raise HTTPException(status_code=response.status_code, detail=detail)
     except Exception as e:
-        return {"Error:", str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
