@@ -15,8 +15,24 @@ load_dotenv()
 ORS_API_KEY = os.getenv("ORS_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-model_path = next((Path(__file__).resolve().parent / "models").glob("*.pt"), None)
-model = YOLO(str(model_path)) if model_path else None
+model_path = Path(__file__).resolve().parent / "models"
+
+def load_model(filename):
+    model_file = model_path / filename
+    if not model_file.exists():
+        return None
+    try:
+        return YOLO(str(model_file))
+    except Exception:
+        return None
+
+
+exit_model = load_model("exit_signs.pt")
+crosswalk_on_model = load_model("crosswalk_on.pt")
+crosswalk_off_model = load_model("crosswalk_off.pt")
+crosswalk_model = load_model("crosswalk.pt")
+school_sign_model = load_model("school_sign.pt")
+
 
 id_to_sign = {
     0: "exit_sign",
@@ -65,10 +81,10 @@ async def voice_input(audio: UploadFile = File(...)):
     finally:
         os.unlink(temp_path)
         
-@app.get("/signs")
+@app.post("/signs")
 async def signs(image: UploadFile = File(...)):
-    if model is None:
-        raise HTTPException(status_code = 500, detail = "No .pt model found in models folder")
+    if all(model_obj is None for model_obj in [exit_model, crosswalk_on_model, crosswalk_off_model, crosswalk_model, school_sign_model]):
+        raise HTTPException(status_code = 500, detail = "No valid .pt model found in models folder")
 
     raw_image = await image.read()
     if not raw_image:
@@ -83,42 +99,48 @@ async def signs(image: UploadFile = File(...)):
         "exit_sign": {
             "detected": False,
             "direction": "center",
-            "size": 0
+            "distance": 0
         },
         "exit_right": {
             "detected": False,
             "direction": "center",
-            "size": 0
+            "distance": 0
         },
         "exit_left": {
             "detected": False,
             "direction": "center",
-            "size": 0
+            "distance": 0
         },
         "exit_both_ways": {
             "detected": False,
             "direction": "center",
-            "size": 0
+            "distance": 0
         },
         "crosswalk": {
             "detected": False,
+            "direction": "center",
+            "distance": 0
         },
         "school_crosswalk": {
             "detected": False,
+            "direction": "center",
+            "distance": 0
         },
         "walk_on": {
             "detected": False,
+            "direction": "center",
+            "distance": 0
         },
         "walk_off": {
             "detected": False,
+            "direction": "center",
+            "distance": 0
         }
     }
     
-    predictions = model.predict(source = frame, verbose = False)
-    result = predictions[0]
-    names = result.names
     frame_width = frame.shape[1]
-    best_conf_by_class = {}
+    frame_height = frame.shape[0]
+    best_area_by_sign = {}
 
     def classify_direction(x_center, width):
         ratio = (x_center / width) - 0.5
@@ -131,21 +153,50 @@ async def signs(image: UploadFile = File(...)):
             return "left" if ratio < 0 else "right"
         return "far left" if ratio < 0 else "far right"
 
-    for box in result.boxes:
-        class_id = int(box.cls[0])
-        class_key = id_to_sign.get(class_id)
-        if class_key is None:
-            class_name = names[class_id]
-            class_key = class_name.lower().replace("-", "_").replace(" ", "_")
-        if class_key in detected_signs:
-            detected_signs[class_key]["detected"] = True
-            confidence = float(box.conf[0])
-            if class_key not in best_conf_by_class or confidence > best_conf_by_class[class_key]:
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
-                x_center = (x1 + x2) / 2
-                if "direction" in detected_signs[class_key]:
-                    detected_signs[class_key]["direction"] = classify_direction(x_center, frame_width)
-                best_conf_by_class[class_key] = confidence
+    def normalize_sign_name(name):
+        return name.lower().replace("-", "_").replace(" ", "_")
+
+    def update_sign_with_box(sign_key, box):
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        area = max(0.0, (x2 - x1)) * max(0.0, (y2 - y1))
+        if sign_key not in best_area_by_sign or area > best_area_by_sign[sign_key]:
+            x_center = (x1 + x2) / 2
+            frame_area = max(1, frame_width * frame_height)
+            area_ratio = min(1.0, area / frame_area)
+            detected_signs[sign_key]["detected"] = True
+            detected_signs[sign_key]["direction"] = classify_direction(x_center, frame_width)
+            detected_signs[sign_key]["distance"] = round((1.0 - area_ratio) * 100, 2)
+            best_area_by_sign[sign_key] = area
+
+    if exit_model is not None:
+        exit_predictions = exit_model.predict(source = frame, verbose = False)
+        exit_result = exit_predictions[0]
+        for box in exit_result.boxes:
+            class_id = int(box.cls[0])
+            sign_key = id_to_sign.get(class_id)
+            if sign_key in detected_signs:
+                update_sign_with_box(sign_key, box)
+
+    extra_model_targets = [
+        (crosswalk_on_model, "walk_on"),
+        (crosswalk_off_model, "walk_off"),
+        (crosswalk_model, "crosswalk"),
+        (school_sign_model, "school_crosswalk"),
+    ]
+
+    for model_obj, sign_key in extra_model_targets:
+        if model_obj is None:
+            continue
+        prediction = model_obj.predict(source = frame, verbose = False)
+        model_result = prediction[0]
+        model_names = model_result.names
+        for box in model_result.boxes:
+            class_id = int(box.cls[0])
+            class_name = model_names[class_id] if isinstance(model_names, dict) else model_names[class_id]
+            if normalize_sign_name(class_name) != sign_key:
+                continue
+            update_sign_with_box(sign_key, box)
+    
 
     return detected_signs
     
