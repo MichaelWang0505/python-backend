@@ -1,4 +1,5 @@
 import os
+import tempfile
 import requests
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
