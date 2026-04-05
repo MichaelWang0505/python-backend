@@ -2,7 +2,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import cv2
 import numpy as np
@@ -21,10 +21,10 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 # --------------------------
 # Config
 # --------------------------
-MAX_IMAGE_SIDE = 960      # Resize input before inference
-YOLO_IMGSZ = 640          # Inference size
-YOLO_CONF = 0.25          # Confidence threshold
-YOLO_IOU = 0.45           # NMS IoU threshold
+MAX_IMAGE_SIDE = 960
+YOLO_IMGSZ = 640
+YOLO_CONF = 0.25
+YOLO_IOU = 0.45
 
 MODEL_DIR = Path(__file__).resolve().parent / "models"
 
@@ -41,7 +41,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Keep a session for outbound ORS calls
 http_session = requests.Session()
 
 
@@ -67,10 +66,6 @@ def load_model(filename: str) -> Optional[YOLO]:
 
 
 exit_model = load_model("exit_signs.pt")
-crosswalk_on_model = load_model("crosswalk_on.pt")
-crosswalk_off_model = load_model("crosswalk_off.pt")
-crosswalk_model = load_model("crosswalk.pt")
-school_sign_model = load_model("school_sign.pt")
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
@@ -88,10 +83,6 @@ def empty_detected_signs() -> Dict[str, Dict[str, object]]:
         "exit_right": {"detected": False, "direction": "center", "distance": 0},
         "exit_left": {"detected": False, "direction": "center", "distance": 0},
         "exit_both_ways": {"detected": False, "direction": "center", "distance": 0},
-        "crosswalk": {"detected": False, "direction": "center", "distance": 0},
-        "school_crosswalk": {"detected": False, "direction": "center", "distance": 0},
-        "walk_on": {"detected": False, "direction": "center", "distance": 0},
-        "walk_off": {"detected": False, "direction": "center", "distance": 0},
     }
 
 
@@ -105,12 +96,9 @@ def preprocess_frame(raw_image: bytes) -> np.ndarray:
         raise HTTPException(status_code=400, detail="Invalid image")
 
     h, w = frame.shape[:2]
-    max_side = max(h, w)
-    if max_side > MAX_IMAGE_SIDE:
-        scale = MAX_IMAGE_SIDE / float(max_side)
-        new_w = int(w * scale)
-        new_h = int(h * scale)
-        frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    if max(h, w) > MAX_IMAGE_SIDE:
+        scale = MAX_IMAGE_SIDE / float(max(h, w))
+        frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
     return frame
 
@@ -132,7 +120,6 @@ def normalize_sign_name(name: str) -> str:
 
 
 def run_predict(model: YOLO, frame: np.ndarray):
-    # Using explicit settings for more stable latency
     return model.predict(
         source=frame,
         imgsz=YOLO_IMGSZ,
@@ -168,24 +155,16 @@ def update_sign_with_box(
 
 @app.on_event("startup")
 def warmup_models():
-    # Warmup reduces first-request latency spikes
+    if exit_model is None:
+        print("[warmup] exit_model not loaded, skipping")
+        return
     warm_frame = np.zeros((YOLO_IMGSZ, YOLO_IMGSZ, 3), dtype=np.uint8)
-    for name, model in [
-        ("exit", exit_model),
-        ("walk_on", crosswalk_on_model),
-        ("walk_off", crosswalk_off_model),
-        ("crosswalk", crosswalk_model),
-        ("school", school_sign_model),
-    ]:
-        if model is None:
-            continue
-        try:
-            start = time.perf_counter()
-            _ = run_predict(model, warm_frame)
-            ms = (time.perf_counter() - start) * 1000
-            print(f"[warmup] {name}: {ms:.1f}ms")
-        except Exception as exc:
-            print(f"[warmup] {name} failed: {exc}")
+    try:
+        start = time.perf_counter()
+        run_predict(exit_model, warm_frame)
+        print(f"[warmup] exit: {(time.perf_counter() - start) * 1000:.1f}ms")
+    except Exception as exc:
+        print(f"[warmup] exit failed: {exc}")
 
 
 @app.get("/")
@@ -195,14 +174,12 @@ def root():
 
 @app.get("/health")
 def health():
-    models_loaded = {
-        "exit_model": exit_model is not None,
-        "crosswalk_on_model": crosswalk_on_model is not None,
-        "crosswalk_off_model": crosswalk_off_model is not None,
-        "crosswalk_model": crosswalk_model is not None,
-        "school_sign_model": school_sign_model is not None,
+    return {
+        "status": "ok",
+        "models": {
+            "exit_model": exit_model is not None,
+        }
     }
-    return {"status": "ok", "models": models_loaded}
 
 
 @app.post("/voice_input")
@@ -236,18 +213,8 @@ async def voice_input(audio: UploadFile = File(...)):
 
 @app.post("/signs")
 def signs(image: UploadFile = File(...)):
-    # sync endpoint: better for CPU-bound inference
-    if all(
-        model_obj is None
-        for model_obj in [
-            exit_model,
-            crosswalk_on_model,
-            crosswalk_off_model,
-            crosswalk_model,
-            school_sign_model,
-        ]
-    ):
-        raise HTTPException(status_code=500, detail="No valid .pt model found in models folder")
+    if exit_model is None:
+        raise HTTPException(status_code=500, detail="exit_signs.pt not found in models folder")
 
     t0 = time.perf_counter()
     raw_image = image.file.read()
@@ -255,56 +222,22 @@ def signs(image: UploadFile = File(...)):
 
     detected_signs = empty_detected_signs()
     best_area_by_sign: Dict[str, float] = {}
-
     frame_height, frame_width = frame.shape[:2]
 
-    # Exit model
-    if exit_model is not None:
-        t = time.perf_counter()
-        exit_predictions = run_predict(exit_model, frame)
-        print(f"[signs] exit_model: {(time.perf_counter() - t) * 1000:.1f}ms")
+    t = time.perf_counter()
+    exit_predictions = run_predict(exit_model, frame)
+    print(f"[signs] exit_model: {(time.perf_counter() - t) * 1000:.1f}ms")
 
-        exit_result = exit_predictions[0]
-        for box in exit_result.boxes:
-            class_id = int(box.cls[0])
-            sign_key = id_to_sign.get(class_id)
-            if sign_key in detected_signs:
-                update_sign_with_box(
-                    detected_signs, best_area_by_sign, sign_key, box, frame_width, frame_height
-                )
-
-    # One-class auxiliary models
-    extra_model_targets: Tuple[Tuple[Optional[YOLO], str], ...] = (
-        (crosswalk_on_model, "walk_on"),
-        (crosswalk_off_model, "walk_off"),
-        (crosswalk_model, "crosswalk"),
-        (school_sign_model, "school_crosswalk"),
-    )
-
-    for model_obj, sign_key in extra_model_targets:
-        if model_obj is None:
-            continue
-
-        t = time.perf_counter()
-        prediction = run_predict(model_obj, frame)
-        print(f"[signs] {sign_key}_model: {(time.perf_counter() - t) * 1000:.1f}ms")
-
-        model_result = prediction[0]
-        model_names = model_result.names
-
-        for box in model_result.boxes:
-            class_id = int(box.cls[0])
-            class_name = model_names[class_id] if isinstance(model_names, (list, tuple)) else model_names[class_id]
-            if normalize_sign_name(class_name) != sign_key:
-                continue
-
+    exit_result = exit_predictions[0]
+    for box in exit_result.boxes:
+        class_id = int(box.cls[0])
+        sign_key = id_to_sign.get(class_id)
+        if sign_key in detected_signs:
             update_sign_with_box(
                 detected_signs, best_area_by_sign, sign_key, box, frame_width, frame_height
             )
 
-    total_ms = (time.perf_counter() - t0) * 1000
-    print(f"[signs] total: {total_ms:.1f}ms")
-
+    print(f"[signs] total: {(time.perf_counter() - t0) * 1000:.1f}ms")
     return detected_signs
 
 
